@@ -18,6 +18,8 @@ pub struct Spec {
     pub claims: Vec<Claim>,
     pub brief: String,
     pub body: String,
+    /// 【부호의 설명】 ("10: 기판 20: 전극")
+    pub signs: String,
     /// 첨부 도면의 【도 N】 목록. None = 도면 섹션이 아예 없음
     pub drawings: Option<Vec<Fig>>,
 }
@@ -26,6 +28,7 @@ enum Sec {
     Body,
     Claim,
     Brief,
+    Signs,
     Skip,
 }
 
@@ -38,7 +41,7 @@ static FIG_ID: LazyLock<Regex> =
 
 const BODY_HEADS: &[&str] = &[
     "발명", "기술분야", "배경기술", "선행기술", "해결하려는과제", "과제의해결", "실시예",
-    "부호의설명", "산업상이용", "명세서", "서열목록",
+    "산업상이용", "명세서", "서열목록",
 ];
 
 pub fn squash(s: &str) -> String {
@@ -65,6 +68,8 @@ pub fn parse(text: &str) -> Spec {
                 spec.claims.push(Claim { num: n, text: String::new(), refs: vec![] });
             } else if name == "도면의간단한설명" {
                 sec = Sec::Brief;
+            } else if name == "부호의설명" {
+                sec = Sec::Signs;
             } else if name == "도면" {
                 sec = Sec::Skip;
                 spec.drawings.get_or_insert_with(Vec::new);
@@ -81,6 +86,7 @@ pub fn parse(text: &str) -> Spec {
         let buf = match sec {
             Sec::Body => &mut spec.body,
             Sec::Brief => &mut spec.brief,
+            Sec::Signs => &mut spec.signs,
             Sec::Claim => &mut spec.claims.last_mut().unwrap().text,
             Sec::Skip => continue,
         };

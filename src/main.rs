@@ -1,54 +1,141 @@
 mod checks;
+mod input;
 mod spec;
 
 use std::io::Read;
 use std::process::ExitCode;
 
-const USAGE: &str = "기재불비 검사기\n\n사용법: inspector42 [명세서.txt]\n  파일을 주지 않으면 표준 입력에서 읽는다 (UTF-8).\n  지적 사항이 있으면 종료 코드 1.";
+const USAGE: &str = "기재불비 검사기
+
+사용법: inspector42 [--json | --dump-text] [명세서 파일]
+  파일: TXT(UTF-8 · UTF-16 · CP949), DOCX, HWPX, HWP 5.0. 없으면 표준 입력.
+  --json       결과를 JSON으로 (형식은 AGENTS.md)
+  --dump-text  검사하지 않고, 파일에서 뽑은 텍스트만 출력 (줄 번호의 기준)
+종료 코드: 0 지적 없음 · 1 지적 있음 · 2 사용법 오류 또는 읽기 실패";
 
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    if arg.as_deref().is_some_and(|a| a == "-h" || a == "--help") {
-        println!("{USAGE}");
+    let mut json = false;
+    let mut dump = false;
+    let mut path = None;
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "--json" => json = true,
+            "--dump-text" => dump = true,
+            _ if a.starts_with('-') && a != "-" => return fail(json, &format!("모르는 옵션: {a}\n\n{USAGE}")),
+            _ if path.is_some() => return fail(json, &format!("파일은 하나만 줄 수 있습니다: {a}")),
+            _ => path = Some(a),
+        }
+    }
+
+    let mut bytes = vec![];
+    let read = match path.as_deref() {
+        Some(p) if p != "-" => std::fs::read(p).map(|b| bytes = b),
+        _ => std::io::stdin().read_to_end(&mut bytes).map(|_| ()),
+    };
+    let text = match read.map_err(|e| format!("읽기 실패: {e}")).and_then(|_| input::to_text(&bytes)) {
+        Ok(t) => t,
+        Err(e) => return fail(json, &e),
+    };
+    if dump {
+        print!("{text}");
         return ExitCode::SUCCESS;
     }
-    let mut bytes = vec![];
-    let read = match &arg {
-        Some(path) => std::fs::read(path).map(|b| bytes = b),
-        None => std::io::stdin().read_to_end(&mut bytes).map(|_| ()),
-    };
-    if let Err(e) = read {
-        eprintln!("읽기 실패: {e}");
-        return ExitCode::from(2);
-    }
-    let Ok(text) = String::from_utf8(bytes) else {
-        eprintln!("UTF-8 텍스트가 아닙니다. 메모장에서 'UTF-8'로 다시 저장해 주세요.");
-        return ExitCode::from(2);
-    };
-    let text = text.trim_start_matches('\u{feff}');
 
-    let spec = spec::parse(text);
+    let spec = spec::parse(&text);
     let reports = [
         checks::sanggi(&spec),
-        checks::numerals(text),
-        checks::repeats(text),
-        checks::josa(text),
+        checks::numerals(&text),
+        checks::repeats(&text),
+        checks::josa(&text),
         checks::figures(&spec),
         checks::citations(&spec),
+        checks::vague(&spec),
+        checks::signs(&spec, &text),
+        checks::claim_form(&spec),
+        checks::support(&spec),
     ];
+    let total: usize = reports.iter().map(|r| r.problems.len()).sum();
 
-    let mut total = 0;
-    for r in &reports {
-        println!("■ {} — {}", r.title, if r.problems.is_empty() { "문제 없음".to_string() } else { format!("{}건", r.problems.len()) });
-        for line in &r.info {
-            println!("    {line}");
+    if json {
+        println!("{}", to_json(&reports, total));
+    } else {
+        for r in &reports {
+            let status = if r.problems.is_empty() { "문제 없음".to_string() } else { format!("{}건", r.problems.len()) };
+            println!("■ {} — {status}", r.title);
+            r.info.iter().for_each(|l| println!("    {l}"));
+            r.problems.iter().for_each(|p| println!("  ✗ {p}"));
+            println!();
         }
-        for p in &r.problems {
-            println!("  ✗ {p}");
-        }
-        println!();
-        total += r.problems.len();
+        println!("합계 {total}건 (참고용 — 최종 판단은 사람이)");
     }
-    println!("합계 {total}건 (참고용 — 최종 판단은 사람이)");
     if total > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// 종료 코드 2. --json이면 오류도 JSON으로 표준 출력에 낸다.
+fn fail(json: bool, msg: &str) -> ExitCode {
+    if json {
+        println!(r#"{{"error":{}}}"#, json_str(msg));
+    } else {
+        eprintln!("{msg}");
+    }
+    ExitCode::from(2)
+}
+
+fn to_json(reports: &[checks::Report], total: usize) -> String {
+    let opt = |v: Option<String>| v.unwrap_or("null".into());
+    let items: Vec<String> = reports
+        .iter()
+        .map(|r| {
+            let info: Vec<String> = r.info.iter().map(|s| json_str(s)).collect();
+            let problems: Vec<String> = r
+                .problems
+                .iter()
+                .map(|p| {
+                    format!(
+                        r#"{{"message":{},"claim":{},"line":{},"find":{},"replace":{}}}"#,
+                        json_str(&p.msg),
+                        opt(p.claim.map(|c| c.to_string())),
+                        opt(p.line.map(|l| l.to_string())),
+                        opt(p.fix.as_ref().map(|f| json_str(&f.0))),
+                        opt(p.fix.as_ref().map(|f| json_str(&f.1))),
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"id":{},"title":{},"info":[{}],"problems":[{}]}}"#,
+                json_str(r.id),
+                json_str(r.title),
+                info.join(","),
+                problems.join(",")
+            )
+        })
+        .collect();
+    format!(r#"{{"total":{total},"reports":[{}]}}"#, items.join(","))
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn json_escapes() {
+        assert_eq!(super::json_str("\"상기\"\\\n\t"), r#""\"상기\"\\\n\u0009""#);
+    }
 }
