@@ -101,6 +101,28 @@ fn term_candidates(rest: &str) -> Vec<String> {
     out
 }
 
+/// 문장 안의 "상기 X"마다 (위치, X 후보들). "상기한", "상기와"는 건너뜀.
+fn sanggi_terms(text: &str) -> Vec<(usize, Vec<String>)> {
+    let mut out = vec![];
+    for (p, _) in text.match_indices("상기") {
+        let rest = &text[p + "상기".len()..];
+        let before = text[..p].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric()) || !rest.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let cands = term_candidates(rest);
+        if !cands.is_empty() {
+            out.push((p, cands));
+        }
+    }
+    out
+}
+
+/// 화면에 보일 어간: 조사를 뗀 것이 있으면 그것
+fn stem(cands: &[String]) -> String {
+    cands.get(1).unwrap_or(&cands[0]).clone()
+}
+
 pub fn sanggi(spec: &Spec) -> Report {
     let mut r = Report::new("상기 체크");
     // 청구항 머리말이 없으면 붙여 넣은 글 전체를 한 덩어리로 본다
@@ -116,14 +138,8 @@ pub fn sanggi(spec: &Spec) -> Report {
         ancestors(spec, num, &mut anc);
         let cited: String = anc.iter().filter_map(|n| spec.claims.iter().find(|c| c.num == *n)).map(|c| squash(&c.text)).collect();
         let mut missing: Vec<String> = vec![];
-        for (p, _) in text.match_indices("상기") {
-            let before = text[..p].chars().next_back();
-            let after = text[p + "상기".len()..].chars().next();
-            if before.is_some_and(|c| c.is_alphanumeric()) || !after.is_some_and(char::is_whitespace) {
-                continue; // "상기한", "상기와" 등
-            }
-            let cands = term_candidates(&text[p + "상기".len()..]);
-            let Some(stem) = cands.get(1).or(cands.first()).cloned() else { continue };
+        for (p, cands) in sanggi_terms(text) {
+            let stem = stem(&cands);
             checked += 1;
             let earlier = squash(&text[..p]);
             if !cands.iter().any(|t| earlier.contains(t.as_str()) || cited.contains(t.as_str())) && !missing.contains(&stem) {
@@ -165,17 +181,37 @@ fn natural(s: &str) -> (String, u32, String) {
 /// 정렬 키 → (원래 부호, 이름별 사용 횟수)
 type ByNum = BTreeMap<(String, u32, String), (String, BTreeMap<String, usize>)>;
 
+/// "이름(부호)" 쌍 (이름은 띄어쓰기 제거)
+fn numeral_pairs(text: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    NUMERAL.captures_iter(text).map(|c| (squash(&c[1]), c[2].to_string()))
+}
+
+fn numeral_map(text: &str) -> ByNum {
+    let mut by_num = ByNum::new();
+    for (name, num) in numeral_pairs(text) {
+        *by_num.entry(natural(&num)).or_insert_with(|| (num, BTreeMap::new())).1.entry(name).or_default() += 1;
+    }
+    by_num
+}
+
+fn name_list(names: &BTreeMap<String, usize>) -> String {
+    names.iter().map(|(n, k)| format!("{n}({k}회)")).collect::<Vec<_>>().join(", ")
+}
+
+/// "전극"과 "상부전극"처럼 한쪽이 다른 쪽을 품으면 같은 구성으로 본다
+fn same_name(a: &str, b: &str) -> bool {
+    a.contains(b) || b.contains(a)
+}
+
 pub fn numerals(text: &str) -> Report {
     let mut r = Report::new("부재번호 체크");
-    let mut by_num = ByNum::new();
+    let by_num = numeral_map(text);
     let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for c in NUMERAL.captures_iter(text) {
-        let (name, num) = (squash(&c[1]), c[2].to_string());
-        *by_num.entry(natural(&num)).or_insert_with(|| (num.clone(), BTreeMap::new())).1.entry(name.clone()).or_default() += 1;
+    for (name, num) in numeral_pairs(text) {
         by_name.entry(name).or_default().insert(num);
     }
     for (num, names) in by_num.values() {
-        let list = names.iter().map(|(n, k)| format!("{n}({k}회)")).collect::<Vec<_>>().join(", ");
+        let list = name_list(names);
         r.info.push(format!("{num}: {list}"));
         if names.len() > 1 {
             r.problems.push(format!("부호 {num}이 여러 이름으로 쓰임: {list}"));
@@ -188,6 +224,136 @@ pub fn numerals(text: &str) -> Report {
             r.problems.push(format!("'{name}'에 부호가 여러 개: {}", nums.join(", ")));
         }
     }
+    r
+}
+
+// ───────────── 불명확한 표현 ─────────────
+
+static VAGUE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^\w])(약\s?\d|대략|거의|바람직|필요에\s?따라|소망에\s?따라|필요시|필요한\s?경우|예를\s?들어|예컨대|특히|주로|등(?:의|을|이|과|으로|에|은|도)?(?:[^\p{Hangul}]|$))").unwrap()
+});
+
+pub fn vague(spec: &Spec) -> Report {
+    let mut r = Report::new("불명확한 표현");
+    for c in &spec.claims {
+        let mut seen = BTreeSet::new();
+        for m in VAGUE.captures_iter(&c.text) {
+            let word = m[1].trim_end_matches(|ch: char| !ch.is_alphanumeric()).to_string();
+            if seen.insert(word.clone()) {
+                r.problems.push(format!("청구항 {}: '{word}' — 권리범위가 불명확해질 수 있음", c.num));
+            }
+        }
+    }
+    r
+}
+
+// ───────────── 부호의 설명 대조 ─────────────
+
+static SIGN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([A-Za-z]?\d+[A-Za-z0-9']*)\s*[:：]\s*").unwrap());
+
+/// "10: 기판 20: 제1 전극, 30: 커버" → [(10, 기판), (20, 제1전극), (30, 커버)]
+fn sign_list(signs: &str) -> Vec<(String, String)> {
+    let mut out = vec![];
+    for line in signs.lines() {
+        let ms: Vec<_> = SIGN.captures_iter(line).collect();
+        for (k, c) in ms.iter().enumerate() {
+            let end = ms.get(k + 1).map_or(line.len(), |n| n.get(0).unwrap().start());
+            let name = line[c.get(0).unwrap().end()..end].trim_matches(|ch: char| ch.is_whitespace() || ",;".contains(ch));
+            out.push((c[1].to_string(), squash(name)));
+        }
+    }
+    out
+}
+
+pub fn signs(spec: &Spec, text: &str) -> Report {
+    let mut r = Report::new("부호의 설명 대조");
+    if spec.signs.trim().is_empty() {
+        r.info.push("【부호의 설명】 섹션이 없어 건너뜀".into());
+        return r;
+    }
+    let listed = sign_list(&spec.signs);
+    let used = numeral_map(text);
+    r.info.push(format!("부호의 설명 {}개", listed.len()));
+    let mut keys = BTreeSet::new();
+    for (num, name) in &listed {
+        if !keys.insert(natural(num)) {
+            r.problems.push(format!("부호 {num}: 부호의 설명에 두 번 나옴"));
+        }
+        match used.get(&natural(num)) {
+            None => r.problems.push(format!("부호 {num}({name}): 본문 · 청구항에서 안 쓰임")),
+            Some((_, names)) if !names.keys().any(|n| same_name(n, name)) => {
+                r.problems.push(format!("부호 {num}: 부호의 설명은 '{name}', 본문은 {}", name_list(names)));
+            }
+            _ => {}
+        }
+    }
+    for (key, (num, names)) in &used {
+        if !keys.contains(key) {
+            r.problems.push(format!("부호 {num}: 부호의 설명에 없음 — 본문은 {}", name_list(names)));
+        }
+    }
+    r
+}
+
+// ───────────── 청구항 형식 ─────────────
+
+pub fn claim_form(spec: &Spec) -> Report {
+    let mut r = Report::new("청구항 형식");
+    let body = numeral_map(&spec.body);
+    for c in &spec.claims {
+        let t = c.text.trim();
+        let ch: Vec<char> = t.chars().collect();
+        // 소수점(0.5)은 마침표로 세지 않는다
+        let dots = (0..ch.len())
+            .filter(|&i| ch[i] == '.' && !(i > 0 && ch[i - 1].is_ascii_digit() && ch.get(i + 1).is_some_and(char::is_ascii_digit)))
+            .count();
+        if !t.ends_with('.') {
+            r.problems.push(format!("청구항 {}: 마침표로 끝나지 않음", c.num));
+        }
+        if dots > 1 {
+            r.problems.push(format!("청구항 {}: 마침표가 {dots}개 — 청구항은 한 문장이어야 함", c.num));
+        }
+        let mut seen = BTreeSet::new();
+        for (name, num) in numeral_pairs(t) {
+            if !seen.insert((name.clone(), num.clone())) {
+                continue;
+            }
+            match body.get(&natural(&num)) {
+                None => r.problems.push(format!("청구항 {}: {name}({num}) — 발명의 설명에 없는 부호", c.num)),
+                Some((_, names)) if !names.keys().any(|n| same_name(n, &name)) => r.problems.push(format!(
+                    "청구항 {}: {name}({num}) — 발명의 설명에서 {num}은 {}",
+                    c.num,
+                    name_list(names)
+                )),
+                _ => {}
+            }
+        }
+    }
+    r
+}
+
+// ───────────── 청구항 용어 뒷받침 ─────────────
+
+/// 청구항의 구성(상기 X, 이름(부호))이 발명의 설명에 나오는지. 특허법 제42조 제4항 제1호
+pub fn support(spec: &Spec) -> Report {
+    let mut r = Report::new("청구항 용어 뒷받침");
+    if spec.body.trim().is_empty() {
+        r.info.push("발명의 설명이 없어 건너뜀".into());
+        return r;
+    }
+    let body = squash(&spec.body);
+    let mut seen = BTreeSet::new();
+    for c in &spec.claims {
+        let terms = sanggi_terms(&c.text).into_iter().map(|(_, t)| t).chain(numeral_pairs(&c.text).map(|(n, _)| vec![n]));
+        for cands in terms {
+            let s = stem(&cands);
+            if seen.insert(s.clone()) && !cands.iter().any(|t| body.contains(t.as_str())) {
+                r.problems.push(format!("청구항 {}: '{s}' — 발명의 설명에 없음", c.num));
+            }
+        }
+    }
+    r.info.push(format!("구성 용어 {}개 확인", seen.len()));
     r
 }
 
@@ -382,6 +548,25 @@ mod tests {
         assert!(p.contains("청구항 4: 2 이상의 항을 택일적"), "{p}");
         assert!(p.contains("청구항 5: 다중인용항이 다중인용항(청구항 4)"), "{p}");
         assert!(p.contains("청구항 5: 자기 자신이나 뒤의 청구항 6"), "{p}");
+
+        let p = problems(vague(&spec));
+        assert!(p.contains("'약 5'") && p.contains("'특히'"), "{p}");
+        assert!(!vague(&parse("【청구항 1】\n균등한 등록 등이방성 장치.")).problems.iter().any(|x| x.contains('등')));
+
+        let p = problems(signs(&spec, SAMPLE));
+        assert!(p.contains("부호 50(스페이서): 본문 · 청구항에서 안 쓰임"), "{p}");
+        assert!(p.contains("부호 11: 부호의 설명에 없음"), "{p}");
+        assert!(!p.contains("부호 10"), "{p}");
+
+        let p = problems(claim_form(&spec));
+        assert!(p.contains("청구항 6: 마침표가 2개"), "{p}");
+        assert!(p.contains("청구항 6: 받침대(40) — 발명의 설명에 없는 부호"), "{p}");
+        assert!(p.contains("청구항 7: 마침표로 끝나지 않음"), "{p}");
+        assert!(!p.contains("청구항 1:"), "{p}");
+
+        let p = problems(support(&spec));
+        assert!(p.contains("청구항 1: '절연층'"), "{p}");
+        assert!(!p.contains("'기판'"), "{p}");
     }
 
     #[test]

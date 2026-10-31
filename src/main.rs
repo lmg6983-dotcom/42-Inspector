@@ -1,54 +1,90 @@
 mod checks;
+mod input;
 mod spec;
 
 use std::io::Read;
 use std::process::ExitCode;
 
-const USAGE: &str = "기재불비 검사기\n\n사용법: inspector42 [명세서.txt]\n  파일을 주지 않으면 표준 입력에서 읽는다 (UTF-8).\n  지적 사항이 있으면 종료 코드 1.";
+const USAGE: &str = "기재불비 검사기
+
+사용법: inspector42 [--json] [명세서 파일]
+  파일: TXT(UTF-8 · UTF-16 · CP949), DOCX, HWPX, HWP 5.0
+  파일을 주지 않으면 표준 입력에서 읽는다.
+  --json  결과를 JSON으로 출력
+  지적 사항이 있으면 종료 코드 1, 읽기 실패는 2.";
 
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    if arg.as_deref().is_some_and(|a| a == "-h" || a == "--help") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    let json = args.iter().any(|a| a == "--json");
+    let path = args.iter().find(|a| !a.starts_with("--"));
+
     let mut bytes = vec![];
-    let read = match &arg {
-        Some(path) => std::fs::read(path).map(|b| bytes = b),
+    let read = match path {
+        Some(p) => std::fs::read(p).map(|b| bytes = b),
         None => std::io::stdin().read_to_end(&mut bytes).map(|_| ()),
     };
-    if let Err(e) = read {
-        eprintln!("읽기 실패: {e}");
-        return ExitCode::from(2);
-    }
-    let Ok(text) = String::from_utf8(bytes) else {
-        eprintln!("UTF-8 텍스트가 아닙니다. 메모장에서 'UTF-8'로 다시 저장해 주세요.");
-        return ExitCode::from(2);
+    let text = match read.map_err(|e| format!("읽기 실패: {e}")).and_then(|_| input::to_text(&bytes)) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
     };
-    let text = text.trim_start_matches('\u{feff}');
 
-    let spec = spec::parse(text);
+    let spec = spec::parse(&text);
     let reports = [
         checks::sanggi(&spec),
-        checks::numerals(text),
-        checks::repeats(text),
-        checks::josa(text),
+        checks::numerals(&text),
+        checks::repeats(&text),
+        checks::josa(&text),
         checks::figures(&spec),
         checks::citations(&spec),
+        checks::vague(&spec),
+        checks::signs(&spec, &text),
+        checks::claim_form(&spec),
+        checks::support(&spec),
     ];
+    let total: usize = reports.iter().map(|r| r.problems.len()).sum();
 
-    let mut total = 0;
-    for r in &reports {
-        println!("■ {} — {}", r.title, if r.problems.is_empty() { "문제 없음".to_string() } else { format!("{}건", r.problems.len()) });
-        for line in &r.info {
-            println!("    {line}");
+    if json {
+        println!("{}", to_json(&reports, total));
+    } else {
+        for r in &reports {
+            let status = if r.problems.is_empty() { "문제 없음".to_string() } else { format!("{}건", r.problems.len()) };
+            println!("■ {} — {status}", r.title);
+            r.info.iter().for_each(|l| println!("    {l}"));
+            r.problems.iter().for_each(|p| println!("  ✗ {p}"));
+            println!();
         }
-        for p in &r.problems {
-            println!("  ✗ {p}");
-        }
-        println!();
-        total += r.problems.len();
+        println!("합계 {total}건 (참고용 — 최종 판단은 사람이)");
     }
-    println!("합계 {total}건 (참고용 — 최종 판단은 사람이)");
     if total > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+fn to_json(reports: &[checks::Report], total: usize) -> String {
+    let list = |v: &[String]| format!("[{}]", v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","));
+    let items: Vec<String> = reports
+        .iter()
+        .map(|r| format!(r#"{{"check":{},"info":{},"problems":{}}}"#, json_str(r.title), list(&r.info), list(&r.problems)))
+        .collect();
+    format!(r#"{{"total":{total},"reports":[{}]}}"#, items.join(","))
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
