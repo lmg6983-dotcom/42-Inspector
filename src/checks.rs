@@ -168,7 +168,7 @@ fn ancestors(spec: &Spec, num: u32, out: &mut BTreeSet<u32>) {
 // ───────────── 부재번호 ─────────────
 
 static NUMERAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"((?:제\d+\s?)?[\p{Hangul}A-Za-z][\p{Hangul}A-Za-z0-9]*)\s?\(([A-Za-z]?\d+[A-Za-z0-9'-]*)\)").unwrap()
+    Regex::new(r"([\p{Hangul}A-Za-z][\p{Hangul}A-Za-z0-9]*)\s?\(([A-Za-z]?\d+[A-Za-z0-9'-]*)\)").unwrap()
 });
 
 /// "S110" → ("S", 110, ""), "10a" → ("", 10, "a"): 사람이 읽는 순서로 정렬
@@ -181,9 +181,51 @@ fn natural(s: &str) -> (String, u32, String) {
 /// 정렬 키 → (원래 부호, 이름별 사용 횟수)
 type ByNum = BTreeMap<(String, u32, String), (String, BTreeMap<String, usize>)>;
 
-/// "이름(부호)" 쌍 (이름은 띄어쓰기 제거)
+/// 이름에 붙이지 않는 앞 낱말
+const NAME_STOP: &[&str] = &["상기", "및", "또는", "각", "각각", "그", "이", "해당", "본", "즉", "적어도", "하나", "모든", "다른", "소정", "또한", "더", "약", "대략", "거의", "주로", "또", "중"];
+/// 이렇게 끝나는 앞 낱말은 조사 · 어미로 보고 멈춘다. 명사 끝에 흔한 '도 · 이 · 가 · 서'(온도, 센서)는 뺐다.
+const NAME_BREAK: &[&str] = &[
+    "에서", "의", "은", "는", "을", "를", "에", "와", "과", "로", "한", "된", "인", "될", "할", "던", "며", "고", "면",
+    "게", "지", "여", "해", "라", "어", "써", "다", "히", "께",
+];
+/// 모든 단계가 "~하는 단계(S100)"라서 이름이 겹쳐도 정상인 것
+const STEP_HEADS: &[&str] = &["단계", "과정", "동작"];
+
+/// 괄호 바로 앞 낱말에서 앞으로 3낱말까지, 명사처럼 보이는 동안 이름에 붙인다.
+/// "배치되는 제1 압력 센서(10)" → "제1 압력 센서", "'측정 구간(5)" → "측정 구간"
+fn element_name(before: &str, head: &str) -> String {
+    let mut words = vec![head];
+    if before.ends_with(char::is_whitespace) {
+        for w in before.split_whitespace().rev().take(3) {
+            let bare = w.trim_start_matches(['\'', '"', '‘', '“']);
+            if bare.is_empty()
+                || !bare.chars().all(char::is_alphanumeric)
+                || NAME_STOP.contains(&bare)
+                || NAME_BREAK.iter().any(|e| bare.ends_with(e))
+            {
+                break;
+            }
+            words.push(bare);
+            if bare.len() < w.len() || ORDINAL.is_match(bare) {
+                break; // 따옴표가 열린 곳, "제1"이 이름의 시작
+            }
+        }
+    }
+    words.reverse();
+    words.join(" ")
+}
+
+/// 이름의 마지막 낱말 ("제1 압력 센서" → "센서")
+fn head(name: &str) -> &str {
+    name.rsplit(' ').next().unwrap_or(name)
+}
+
+/// "이름(부호)" 쌍. "수행할 수 있다(S100)"처럼 문장 끝에 붙은 단계 부호는 이름 없이 건너뜀
 fn numeral_pairs(text: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    NUMERAL.captures_iter(text).map(|c| (squash(&c[1]), c[2].to_string()))
+    NUMERAL
+        .captures_iter(text)
+        .filter(|c| !c[1].ends_with('다'))
+        .map(|c| (element_name(&text[..c.get(0).unwrap().start()], &c[1]), c[2].to_string()))
 }
 
 fn numeral_map(text: &str) -> ByNum {
@@ -198,27 +240,32 @@ fn name_list(names: &BTreeMap<String, usize>) -> String {
     names.iter().map(|(n, k)| format!("{n}({k}회)")).collect::<Vec<_>>().join(", ")
 }
 
-/// "전극"과 "상부전극"처럼 한쪽이 다른 쪽을 품으면 같은 구성으로 본다
+/// "전극"과 "상부 전극"처럼 한쪽이 다른 쪽을 품으면 같은 구성으로 본다 (띄어쓰기 무시)
 fn same_name(a: &str, b: &str) -> bool {
-    a.contains(b) || b.contains(a)
+    let (a, b) = (squash(a), squash(b));
+    a.contains(&b) || b.contains(&a)
 }
 
 pub fn numerals(text: &str) -> Report {
     let mut r = Report::new("부재번호 체크");
     let by_num = numeral_map(text);
-    let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // 띄어쓰기 없앤 이름 → (보여줄 이름, 부호들)
+    let mut by_name: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
     for (name, num) in numeral_pairs(text) {
-        by_name.entry(name).or_default().insert(num);
+        by_name.entry(squash(&name)).or_insert_with(|| (name, BTreeSet::new())).1.insert(num);
     }
     for (num, names) in by_num.values() {
         let list = name_list(names);
         r.info.push(format!("{num}: {list}"));
-        if names.len() > 1 {
+        // "제1 압력 센서"와 "압력 센서"는 줄여 쓴 것으로 보고, 마지막 낱말이나 서수(제1 · 제2)가 다를 때만
+        let heads: BTreeSet<_> = names.keys().map(|n| head(n)).collect();
+        let ordinals: BTreeSet<_> = names.keys().filter_map(|n| n.split(' ').find(|w| ORDINAL.is_match(w))).collect();
+        if heads.len() > 1 || ordinals.len() > 1 {
             r.problems.push(format!("부호 {num}이 여러 이름으로 쓰임: {list}"));
         }
     }
-    for (name, nums) in by_name {
-        if nums.len() > 1 {
+    for (name, nums) in by_name.into_values() {
+        if nums.len() > 1 && !STEP_HEADS.iter().any(|h| name.ends_with(h)) {
             let mut nums: Vec<_> = nums.into_iter().collect();
             nums.sort_by_key(|n| natural(n));
             r.problems.push(format!("'{name}'에 부호가 여러 개: {}", nums.join(", ")));
@@ -345,10 +392,10 @@ pub fn support(spec: &Spec) -> Report {
     let body = squash(&spec.body);
     let mut seen = BTreeSet::new();
     for c in &spec.claims {
-        let terms = sanggi_terms(&c.text).into_iter().map(|(_, t)| t).chain(numeral_pairs(&c.text).map(|(n, _)| vec![n]));
+        let terms = sanggi_terms(&c.text).into_iter().map(|(_, t)| t).chain(numeral_pairs(&c.text).map(|(n, _)| vec![n.clone(), head(&n).to_string()]));
         for cands in terms {
             let s = stem(&cands);
-            if seen.insert(s.clone()) && !cands.iter().any(|t| body.contains(t.as_str())) {
+            if seen.insert(s.clone()) && !cands.iter().any(|t| body.contains(&squash(t))) {
                 r.problems.push(format!("청구항 {}: '{s}' — 발명의 설명에 없음", c.num));
             }
         }
@@ -567,6 +614,19 @@ mod tests {
         let p = problems(support(&spec));
         assert!(p.contains("청구항 1: '절연층'"), "{p}");
         assert!(!p.contains("'기판'"), "{p}");
+    }
+
+    #[test]
+    fn element_names() {
+        let names: Vec<_> = numeral_pairs(
+            "기판 상에 배치되는 제1 광 센서(11)와, 그 중 제1 광 센서(11), '측정 구간(5)은 프레임 하우징(3)에서 상기 센서(10) 및 보조 센서(12)를 수행할 수 있다(S10). 측정하는 단계(S20)",
+        )
+        .map(|(n, k)| format!("{k}={n}"))
+        .collect();
+        assert_eq!(names, ["11=제1 광 센서", "11=제1 광 센서", "5=측정 구간", "3=프레임 하우징", "10=센서", "12=보조 센서", "S20=단계"]);
+
+        let p = problems(numerals("제1 광 센서(11), 광 센서(11), 하는 단계(S1), 되는 단계(S2), 기판(13), 커버(13), 제1 판(14), 제2 판(14)"));
+        assert_eq!(p, "부호 13이 여러 이름으로 쓰임: 기판(1회), 커버(1회)\n부호 14이 여러 이름으로 쓰임: 제1 판(1회), 제2 판(1회)");
     }
 
     #[test]
