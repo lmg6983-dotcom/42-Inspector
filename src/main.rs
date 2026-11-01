@@ -7,15 +7,19 @@ use std::process::ExitCode;
 
 const USAGE: &str = "기재불비 검사기
 
-사용법: inspector42 [--json | --dump-text] [명세서 파일]
+사용법: inspector42 [--json] [--style | --dump-text | --sign-list] [명세서 파일]
   파일: TXT(UTF-8 · UTF-16 · CP949), DOCX, HWPX, HWP 5.0. 없으면 표준 입력.
   --json       결과를 JSON으로 (형식은 AGENTS.md)
+  --style      문체 검사도 함께 (가운데 점 · 불릿 · 순서 표현 · 본문의 '청구항' · 과장 · 단정 표현)
   --dump-text  검사하지 않고, 파일에서 뽑은 텍스트만 출력 (줄 번호의 기준)
+  --sign-list  검사하지 않고, 본문의 '이름(부호)'로 【부호의 설명】 블록을 만들어 출력
 종료 코드: 0 지적 없음 · 1 지적 있음 · 2 사용법 오류 또는 읽기 실패";
 
 fn main() -> ExitCode {
     let mut json = false;
     let mut dump = false;
+    let mut style = false;
+    let mut sign_list = false;
     let mut path = None;
     for a in std::env::args().skip(1) {
         match a.as_str() {
@@ -25,6 +29,8 @@ fn main() -> ExitCode {
             }
             "--json" => json = true,
             "--dump-text" => dump = true,
+            "--style" => style = true,
+            "--sign-list" => sign_list = true,
             _ if a.starts_with('-') && a != "-" => return fail(json, &format!("모르는 옵션: {a}\n\n{USAGE}")),
             _ if path.is_some() => return fail(json, &format!("파일은 하나만 줄 수 있습니다: {a}")),
             _ => path = Some(a),
@@ -44,9 +50,20 @@ fn main() -> ExitCode {
         print!("{text}");
         return ExitCode::SUCCESS;
     }
+    if sign_list {
+        let (block, warnings) = checks::sign_block(&text);
+        if json {
+            let w: Vec<String> = warnings.iter().map(|s| json_str(s)).collect();
+            println!(r#"{{"block":{},"warnings":[{}]}}"#, json_str(&block), w.join(","));
+        } else {
+            print!("{block}");
+            warnings.iter().for_each(|w| eprintln!("WARN {w}"));
+        }
+        return ExitCode::SUCCESS;
+    }
 
     let spec = spec::parse(&text);
-    let reports = [
+    let mut reports = vec![
         checks::sanggi(&spec),
         checks::numerals(&text),
         checks::repeats(&text),
@@ -58,6 +75,9 @@ fn main() -> ExitCode {
         checks::claim_form(&spec),
         checks::support(&spec),
     ];
+    if style {
+        reports.push(checks::style(&text));
+    }
     let total: usize = reports.iter().map(|r| r.problems.len()).sum();
 
     if json {

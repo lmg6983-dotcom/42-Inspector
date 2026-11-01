@@ -22,6 +22,8 @@ cargo run -- examples/sample.txt
 ```bash
 inspector42 --json 명세서.hwp       # 검사 결과 JSON
 inspector42 --dump-text 명세서.hwp  # 파일에서 뽑은 텍스트 (line 번호의 기준)
+inspector42 --json --style 명세서.txt  # 문체 검사(id `style`)까지
+inspector42 --sign-list 명세서.txt   # 【부호의 설명】 블록 생성 (--json이면 {"block", "warnings"})
 ```
 
 종료 코드: `0` 지적 없음, `1` 지적 있음, `2` 사용법 오류 · 읽기 실패. 모르는 옵션이나 파일 두 개는 `2`.
@@ -36,7 +38,7 @@ inspector42 --dump-text 명세서.hwp  # 파일에서 뽑은 텍스트 (line 번
 ]}
 ```
 
-- `id`는 바뀌지 않는 영문 식별자: `antecedent` `numerals` `repeats` `particles` `figures` `citations` `vague` `sign_list` `claim_form` `support`
+- `id`는 바뀌지 않는 영문 식별자: `antecedent` `numerals` `repeats` `particles` `figures` `citations` `vague` `sign_list` `claim_form` `support`, `--style`일 때만 `style`
 - `claim`: 청구항 번호 (`0` = 청구항 머리말이 없어 글 전체를 한 덩어리로 본 경우), `line`: `--dump-text` 출력의 줄 번호 (DOCX · HWP · HWPX는 문단 번호)
 - `find` / `replace`: 그대로 바꿔도 되는 지적에만 있다 (괄호 뒤 조사, 반복 단어). 나머지는 사람이 판단할 일이라 `null`
 - `--json`에서 오류는 표준 출력에 `{"error": "..."}`, 종료 코드 `2`
