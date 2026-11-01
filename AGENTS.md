@@ -50,13 +50,14 @@ inspector42 --dump-text 명세서.hwp  # 파일에서 뽑은 텍스트 (line 번
 | `src/spec.rs` | `【…】` 머리말로 청구항 · 도면의 간단한 설명 · 본문 · 부호의 설명 · 첨부 도면을 나누고 인용항을 푼다 |
 | `src/checks.rs` | 검사 10종. 각각 `Report { id, title, info, problems: Vec<Finding> }`를 돌려준다 |
 | `src/main.rs` | CLI, 텍스트 · JSON 출력 |
+| `skill/inspector42/SKILL.md` | 에이전트 스킬 문서. CI가 실행 파일과 묶어 산출물로 올린다. 옵션 · 출력 · `id`를 바꾸면 함께 고친다 |
 
 ## 검사를 고치거나 더할 때
 
 1. `checks.rs`에 함수 하나 (`Report::new("영문_id", "한글 제목")`), 지적은 `r.claim(..)` · `r.add(..)` · `r.fix(..)`
 2. `main.rs`의 `reports` 배열에 추가
 3. `examples/sample.txt`에 걸리는 예를 넣고 `sample_spec` 테스트에 assert 추가 — 기존 assert가 깨지면 안 된다
-4. README 표와 이 파일의 `id` 목록 갱신
+4. README 표, 이 파일과 `skill/inspector42/SKILL.md`의 `id` 목록 갱신
 
 원칙: 애매하면 지적하지 않는다. 오탐은 도구를 안 쓰게 만든다.
 실제 명세서에서 오탐이 나오면, 원인이 된 문형을 **지어낸 예문**으로 테스트에 옮긴 뒤 고친다.

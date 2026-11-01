@@ -27,6 +27,14 @@ cargo run --release -- --json 명세서.docx
 
 예시: `cargo run -- examples/sample.txt`. 결과는 참고용이다.
 
+## 스킬로 설치
+
+1. GitHub Actions 산출물 `inspector42-Windows`(SKILL.md + `bin\inspector42.exe`)를 내려받는다. `v*` 태그를 달면 릴리스에 zip으로도 올라간다.
+2. 스킬 폴더(예: `C:\Users\<user>\.gemini\config\skills\inspector42\`)에 그대로 복사한다.
+
+직접 빌드할 경우(Rust 필요): `powershell -ExecutionPolicy Bypass -File scripts\install.ps1 [-Dest <폴더>]`.
+다른 위치에 설치했다면 SKILL.md의 실행 경로도 바꾼다. 스킬 사용법은 [`skill/inspector42/SKILL.md`](skill/inspector42/SKILL.md).
+
 ## 알려진 한계
 
 - 암호가 걸린 HWP · 배포용 HWP는 읽지 못한다(안내 메시지를 낸다). DOC(구 Word)도 미지원.
