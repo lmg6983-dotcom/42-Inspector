@@ -10,6 +10,7 @@ cargo run --release -- --json 명세서.docx
 - 읽는 형식: **HWP 5.0 · HWPX · DOCX · TXT**(UTF-8 · UTF-16 · CP949). 확장자가 아니라 파일 내용으로 판별한다. 파일을 주지 않으면 표준 입력에서 읽는다.
 - 종료 코드: 지적 사항 없음 0, 있음 1, 사용법 오류 · 읽기 실패 2.
 - `--json`: 결과를 JSON으로 (위치 · 고칠 말 포함, 형식은 [AGENTS.md](AGENTS.md)). `--dump-text`: 파일에서 뽑은 텍스트만 출력
+- `--style`: 문체 검사를 더한다(아래 표 마지막 줄). `--sign-list`: 검사 대신 본문의 `이름(부호)`로 `【부호의 설명】` 블록을 만들어 출력(한 부호에 이름이 여럿이면 표준 오류에 `WARN`)
 - KIPO 형식 머리말(`【청구항 1】`, `【도면의 간단한 설명】`, `【부호의 설명】`, `【도 1】` …)로 섹션을 나눈다. `[청구항 1]`처럼 대괄호여도 된다.
 
 | 검사 | 내용 |
@@ -24,8 +25,17 @@ cargo run --release -- --json 명세서.docx
 | 부호의 설명 대조 | `【부호의 설명】`과 실제 쓰인 부호: 안 쓰인 부호, 목록에 없는 부호, 이름 불일치 |
 | 청구항 형식 | 마침표로 끝나는 한 문장인지(소수점 제외), 청구항의 `이름(부호)`가 발명의 설명과 같은지 |
 | 청구항 용어 뒷받침 | 청구항의 구성(`상기 X`, `이름(부호)`)이 발명의 설명에 나오는지 (특허법 제42조 제4항 제1호) |
+| 문체 (`--style`) | 청구범위 밖에서 한글 사이 가운데 점, 불릿으로 시작하는 줄, `첫째` · `둘째`, 본문의 `청구항`, 과장 표현(`획기적` `극대화` `대폭` …), 단정 표현(`필수적으로` `오직` …, `반드시 ~ 아니다`는 제외) |
 
 예시: `cargo run -- examples/sample.txt`. 결과는 참고용이다.
+
+## 스킬로 설치
+
+1. GitHub Actions 산출물 `inspector42-Windows`(SKILL.md + `bin\inspector42.exe`)를 내려받는다. `v*` 태그를 달면 릴리스에 zip으로도 올라간다.
+2. 스킬 폴더(예: `C:\Users\<user>\.gemini\config\skills\inspector42\`)에 그대로 복사한다.
+
+직접 빌드할 경우(Rust 필요): `powershell -ExecutionPolicy Bypass -File scripts\install.ps1 [-Dest <폴더>]`.
+다른 위치에 설치했다면 SKILL.md의 실행 경로도 바꾼다. 스킬 사용법은 [`skill/inspector42/SKILL.md`](skill/inspector42/SKILL.md).
 
 ## 알려진 한계
 

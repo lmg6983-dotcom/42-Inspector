@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            bin: inspector42.exe
+          - os: ubuntu-latest
+            bin: inspector42
+          - os: macos-latest
+            bin: inspector42
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Package skill folder
+        shell: bash
+        run: |
+          mkdir -p dist/inspector42/bin
+          cp skill/inspector42/*.md dist/inspector42/
+          cp target/release/${{ matrix.bin }} dist/inspector42/bin/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inspector42-${{ runner.os }}
+          path: dist/inspector42
+      - name: Zip for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: cd dist && 7z a ../inspector42-${{ runner.os }}.zip inspector42 >/dev/null || zip -r ../inspector42-${{ runner.os }}.zip inspector42
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: inspector42-${{ runner.os }}.zip
