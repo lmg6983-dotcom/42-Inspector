@@ -37,6 +37,10 @@ fn main() -> ExitCode {
         }
     }
 
+    if [dump, style, sign_list].iter().filter(|&&f| f).count() > 1 {
+        return fail(json, &format!("--style, --dump-text, --sign-list는 하나만 줄 수 있습니다\n\n{USAGE}"));
+    }
+
     let mut bytes = vec![];
     let read = match path.as_deref() {
         Some(p) if p != "-" => std::fs::read(p).map(|b| bytes = b),

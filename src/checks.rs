@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::spec::{Fig, Spec, squash};
+use crate::spec::{Fig, Part, Spec, squash};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -221,24 +221,21 @@ type ByNum = BTreeMap<(String, u32, String), (String, BTreeMap<String, usize>)>;
 const NAME_STOP: &[&str] = &["상기", "및", "또는", "각", "각각", "그", "이", "해당", "본", "즉", "적어도", "하나", "모든", "다른", "소정", "또한", "더", "약", "대략", "거의", "주로", "또", "중"];
 /// 이렇게 끝나는 앞 낱말은 조사 · 어미로 보고 멈춘다. 명사 끝에 흔한 '도 · 이 · 가 · 서'(온도, 센서)는 뺐다.
 const NAME_BREAK: &[&str] = &[
-    "에서", "의", "은", "는", "을", "를", "에", "와", "과", "로", "한", "된", "인", "될", "할", "던", "며", "면",
+    "에서", "의", "은", "는", "을", "를", "에", "와", "과", "로", "한", "된", "인", "될", "할", "던", "며", "고", "면",
     "게", "지", "여", "해", "라", "어", "써", "다", "히", "께",
 ];
-/// '~고'로 끝나는 동사형. '고' 하나로는 끊지 않는다 (재고 · 창고 · 광고는 명사)
-const VERB_GO: &[&str] = &[
-    "하고", "되고", "있고", "없고", "않고", "이고", "받고", "지고", "주고", "두고", "놓고", "덮고", "얻고", "갖고", "같고",
+/// '고'로 끝나도 어미가 아닌 명사 (재고 관리 장치, 광고 서버). 목록에 없는 '~고'는 어미로 보고 끊는다
+/// — 이름이 짧아지는 쪽이 '그리고 센서'처럼 엉뚱한 낱말이 붙는 쪽보다 안전하다.
+const NOUN_GO: &[&str] = &[
+    "재고", "창고", "광고", "경고", "금고", "잔고", "원고", "신고", "보고", "공고", "차고", "냉장고", "저장고", "격납고",
 ];
 /// 모든 단계가 "~하는 단계(S100)"라서 이름이 겹쳐도 정상인 것
 const STEP_HEADS: &[&str] = &["단계", "과정", "동작"];
 
-/// 괄호 바로 앞 낱말에서 앞으로 3낱말까지, 명사처럼 보이는 동안 이름에 붙인다.
+/// 괄호 바로 앞 낱말에서 앞으로 `max`낱말까지, 명사처럼 보이는 동안 이름에 붙인다.
 /// "배치되는 제1 압력 센서(10)" → "제1 압력 센서", "'측정 구간(5)" → "측정 구간"
-fn element_name(before: &str, head: &str) -> String {
-    element_name_n(before, head, 3)
-}
-
-/// `element_name`과 같되 앞으로 `max`낱말까지 본다 (부호의 설명용: 긴 장치 이름도 온전히)
-fn element_name_n(before: &str, head: &str, max: usize) -> String {
+/// `max`: 검사는 3낱말, 부호의 설명 생성은 6낱말 (긴 장치 이름도 온전히)
+fn element_name(before: &str, head: &str, max: usize) -> String {
     let mut words = vec![head];
     if before.ends_with(char::is_whitespace) {
         for w in before.split_whitespace().rev().take(max) {
@@ -246,8 +243,7 @@ fn element_name_n(before: &str, head: &str, max: usize) -> String {
             if bare.is_empty()
                 || !bare.chars().all(char::is_alphanumeric)
                 || NAME_STOP.contains(&bare)
-                || NAME_BREAK.iter().any(|e| bare.ends_with(e))
-                || VERB_GO.iter().any(|e| bare.ends_with(e))
+                || (NAME_BREAK.iter().any(|e| bare.ends_with(e)) && !NOUN_GO.iter().any(|n| bare.ends_with(n)))
             {
                 break;
             }
@@ -268,18 +264,35 @@ fn head(name: &str) -> &str {
 
 /// "이름(부호)" 쌍. "수행할 수 있다(S100)"처럼 문장 끝에 붙은 단계 부호는 이름 없이 건너뜀
 fn numeral_pairs(text: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    numeral_pairs_n(text, 3)
+}
+
+/// `numeral_pairs`와 같되 이름을 앞으로 `max`낱말까지 본다
+fn numeral_pairs_n(text: &str, max: usize) -> impl Iterator<Item = (String, String)> + '_ {
     NUMERAL
         .captures_iter(text)
         .filter(|c| !c[1].ends_with('다'))
-        .map(|c| (element_name(&text[..c.get(0).unwrap().start()], &c[1]), c[2].to_string()))
+        .map(move |c| (element_name(&text[..c.get(0).unwrap().start()], &c[1], max), c[2].to_string()))
 }
 
 fn numeral_map(text: &str) -> ByNum {
+    by_number(numeral_pairs(text))
+}
+
+fn by_number(pairs: impl Iterator<Item = (String, String)>) -> ByNum {
     let mut by_num = ByNum::new();
-    for (name, num) in numeral_pairs(text) {
+    for (name, num) in pairs {
         *by_num.entry(natural(&num)).or_insert_with(|| (num, BTreeMap::new())).1.entry(name).or_default() += 1;
     }
     by_num
+}
+
+/// 한 부호의 이름들이 다른 구성을 가리키는지: 마지막 낱말이나 서수(제1 · 제2)가 다를 때만.
+/// "제1 압력 센서"와 "압력 센서"는 줄여 쓴 것으로 본다.
+fn names_conflict(names: &BTreeMap<String, usize>) -> bool {
+    let heads: BTreeSet<_> = names.keys().map(|n| head(n)).collect();
+    let ordinals: BTreeSet<_> = names.keys().filter_map(|n| n.split(' ').find(|w| ORDINAL.is_match(w))).collect();
+    heads.len() > 1 || ordinals.len() > 1
 }
 
 fn name_list(names: &BTreeMap<String, usize>) -> String {
@@ -303,10 +316,7 @@ pub fn numerals(text: &str) -> Report {
     for (num, names) in by_num.values() {
         let list = name_list(names);
         r.info.push(format!("{num}: {list}"));
-        // "제1 압력 센서"와 "압력 센서"는 줄여 쓴 것으로 보고, 마지막 낱말이나 서수(제1 · 제2)가 다를 때만
-        let heads: BTreeSet<_> = names.keys().map(|n| head(n)).collect();
-        let ordinals: BTreeSet<_> = names.keys().filter_map(|n| n.split(' ').find(|w| ORDINAL.is_match(w))).collect();
-        if heads.len() > 1 || ordinals.len() > 1 {
+        if names_conflict(names) {
             r.add(format!("부호 {num}이 여러 이름으로 쓰임: {list}"));
         }
     }
@@ -389,18 +399,16 @@ pub fn signs(spec: &Spec, text: &str) -> Report {
     r
 }
 
-/// 본문의 "이름(부호)"로 【부호의 설명】 블록을 만든다. 단계 부호(S100 · "~하는 단계")는 뺀다.
+/// 본문의 "이름(부호)"로 【부호의 설명】 블록을 만든다. 단계 부호는 뺀다:
+/// "~하는 단계(S100)"처럼 이름이 단계 · 과정 · 동작이거나, "획득하고(S110)"처럼 부호 앞이 어미인 것.
+/// 스위치(S1)처럼 S로 시작해도 이름이 명사면 넣는다.
 /// 한 부호에 이름이 여럿이면 가장 많이 쓴 이름(같으면 긴 이름)을 넣고 경고를 돌려준다.
 pub fn sign_block(text: &str) -> (String, Vec<String>) {
-    let mut by_num = ByNum::new();
-    for c in NUMERAL.captures_iter(text).filter(|c| !c[1].ends_with('다')) {
-        let num = c[2].to_string();
-        let name = element_name_n(&text[..c.get(0).unwrap().start()], &c[1], 6);
-        if num.starts_with(['S', 's']) || STEP_HEADS.iter().any(|h| name.ends_with(h)) {
-            continue;
-        }
-        *by_num.entry(natural(&num)).or_insert_with(|| (num, BTreeMap::new())).1.entry(name).or_default() += 1;
-    }
+    let by_num = by_number(numeral_pairs_n(text, 6).filter(|(name, _)| {
+        let last = head(name);
+        !STEP_HEADS.iter().any(|h| last.ends_with(h))
+            && !(NAME_BREAK.iter().any(|e| last.ends_with(e)) && !NOUN_GO.iter().any(|n| last.ends_with(n)))
+    }));
     let mut block = String::from("【부호의 설명】\n");
     let mut warnings = vec![];
     for (num, names) in by_num.values() {
@@ -409,9 +417,7 @@ pub fn sign_block(text: &str) -> (String, Vec<String>) {
             .max_by_key(|(n, k)| (**k, n.chars().count()))
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
-        let heads: BTreeSet<_> = names.keys().map(|n| head(n)).collect();
-        let ordinals: BTreeSet<_> = names.keys().filter_map(|n| n.split(' ').find(|w| ORDINAL.is_match(w))).collect();
-        if heads.len() > 1 || ordinals.len() > 1 {
+        if names_conflict(names) {
             warnings.push(format!("부호 {num}: 이름이 여럿 — {} → '{best}'를 넣음", name_list(names)));
         }
         block.push_str(&format!("{num}: {best}\n"));
@@ -421,28 +427,26 @@ pub fn sign_block(text: &str) -> (String, Vec<String>) {
 
 // ───────────── 문체 (--style) ─────────────
 
-static STYLE_HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[【\[]([^】\]]+)[】\]]").unwrap());
 static MIDDOT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\p{Hangul}A-Za-z0-9]\s?[·ㆍ]\s?\p{Hangul}").unwrap());
 static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[•▪◦*·\-]\s+\S").unwrap());
 static ORDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[^\p{Hangul}])(첫째|둘째|셋째|넷째|다섯째)").unwrap());
 static HYPE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(획기적|혁신적|탁월|완벽하게|완벽한|극대화|대폭|근본적으로|원천적으로|세계\s?최초|뛰어난|매우\s?우수)").unwrap()
+    // 앞이 한글이면 다른 낱말의 일부(최대폭 · 확대폭)이므로 낱말 첫머리에서만 찾는다
+    Regex::new(r"(?:^|[^\p{Hangul}])(획기적|혁신적|탁월|완벽하게|완벽한|극대화|대폭|근본적으로|원천적으로|세계\s?최초|뛰어난|매우\s?우수)").unwrap()
 });
 static ABSOLUTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(반드시|필수적으로|오직|유일하게)").unwrap());
 
-/// 특허 명세서 문체 규칙 (선택 검사). 청구범위 섹션과 수학식 줄은 보지 않는다.
+/// 특허 명세서 문체 규칙 (선택 검사). 섹션은 `spec::lines`로 정한다: 청구항 · 첨부 도면은 보지 않고,
+/// 【수학식 N】 머리말 다음 줄(수식)도 건너뛴다. "[0012] 본문…"처럼 머리말 뒤에 이어진 글은 본다.
 pub fn style(text: &str) -> Report {
     let mut r = Report::new("style", "문체");
-    let mut in_claims = false;
     let mut after_eq = false;
-    for (i, line) in text.lines().enumerate() {
-        if let Some(h) = STYLE_HEADER.captures(line) {
-            let h = squash(&h[1]);
-            in_claims = h.starts_with("청구범위") || h.starts_with("청구항");
-            after_eq = h.starts_with("수학식");
-            continue;
-        }
-        if in_claims || std::mem::take(&mut after_eq) || line.trim().is_empty() {
+    for (i, l) in crate::spec::lines(text).into_iter().enumerate() {
+        let eq_header = l.header.as_deref().is_some_and(|h| h.starts_with("수학식"));
+        let skip = matches!(l.part, Part::Claim | Part::Skip) || eq_header || (after_eq && l.header.is_none());
+        after_eq = eq_header && l.rest.trim().is_empty();
+        let line = l.rest;
+        if skip || line.trim().is_empty() {
             continue;
         }
         let mut hit = |msg: String| r.problems.push(Finding { msg, line: Some(i + 1), ..Default::default() });
@@ -458,7 +462,7 @@ pub fn style(text: &str) -> Report {
         if line.contains("청구항") {
             hit("본문에 '청구항' — 명세서 본문에서는 쓰지 않음".into());
         }
-        let hype: BTreeSet<_> = HYPE.find_iter(line).map(|m| m.as_str().to_string()).collect();
+        let hype: BTreeSet<_> = HYPE.captures_iter(line).map(|c| c[1].to_string()).collect();
         if !hype.is_empty() {
             hit(format!("과장 표현: {}", hype.into_iter().collect::<Vec<_>>().join(", ")));
         }
@@ -766,6 +770,31 @@ mod tests {
 
         let names: Vec<_> = numeral_pairs("기판을 포함하고 전극(20), 광고 서버(30)").map(|(n, _)| n).collect();
         assert_eq!(names, ["전극", "광고 서버"]);
+    }
+
+    #[test]
+    fn style_sections() {
+        // 문단번호와 같은 줄에 있는 본문도 본다
+        let p = problems(style("【발명의 설명】\n[0012] 본 개시는 획기적으로 온·오프한다.\n"));
+        assert!(p.contains("2줄: 가운데 점") && p.contains("2줄: 과장 표현: 획기적"), "{p}");
+        // 청구항 안의 【수학식】 뒤도 청구항이다
+        let p = problems(style("【청구범위】\n【청구항 1】\n장치로서,\n【수학식 1】\nA = B\n상기 청구항 1의 온·오프를 반드시 하는 장치.\n"));
+        assert!(p.is_empty(), "{p}");
+        // 본문의 수식 줄은 건너뛰고, 그다음 줄은 본다
+        let p = problems(style("【수학식 1】\nA · 반드시 B\n상기 A는 오직 양수이다.\n"));
+        assert_eq!(p, "3줄: 단정적 표현: 오직 — 권리범위를 좁힘");
+        // 다른 낱말 속 '대폭'은 과장 표현이 아니다
+        let p = problems(style("슬롯의 최대폭은 3 mm이고 확대폭도 같다. 비용을 대폭 줄인다.\n"));
+        assert_eq!(p, "1줄: 과장 표현: 대폭");
+    }
+
+    #[test]
+    fn sign_block_edges() {
+        let (block, warnings) = sign_block(
+            "그리고 센서(10)는 신호를 내보내고 펌프(20)는 돈다. 스위치(S1)를 누르고, 이미지를 획득하고(S110) 상기 스위치(S1)는 열린다.",
+        );
+        assert_eq!(block, "【부호의 설명】\n10: 센서\n20: 펌프\nS1: 스위치\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

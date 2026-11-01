@@ -24,12 +24,24 @@ pub struct Spec {
     pub drawings: Option<Vec<Fig>>,
 }
 
-enum Sec {
+/// 줄이 속한 섹션. `parse`와 문체 검사(`checks::style`)가 같은 판단을 쓴다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Part {
     Body,
     Claim,
     Brief,
     Signs,
+    /// 요약서 · 요약 · 대표도 (검사에서 빼지만 문체는 본다)
+    Abstract,
+    /// 청구범위 머리말 줄, 첨부 도면
     Skip,
+}
+
+/// 한 줄을 나눈 결과: 섹션, 줄 앞 머리말(띄어쓰기 없앤 이름), 머리말 뒤 본문
+pub struct Line<'a> {
+    pub part: Part,
+    pub header: Option<String>,
+    pub rest: &'a str,
 }
 
 static HEADER: LazyLock<Regex> =
@@ -55,42 +67,59 @@ pub fn fig_id(s: &str) -> Option<Fig> {
     Some((c[1].parse().ok()?, suffix))
 }
 
-pub fn parse(text: &str) -> Spec {
-    let mut spec = Spec::default();
-    let mut sec = Sec::Body;
+/// 줄마다 섹션을 정한다. 【표 1】 · 【수학식 1】 · [0001] 같은 머리말은 섹션을 바꾸지 않는다.
+pub fn lines(text: &str) -> Vec<Line<'_>> {
+    let mut part = Part::Body;
+    let mut out = vec![];
     for line in text.lines() {
         let mut rest = line;
+        let mut header = None;
         if let Some(m) = HEADER.captures(line) {
             let name = squash(&m[1]);
             rest = &line[m.get(0).unwrap().end()..];
-            if let Some(n) = name.strip_prefix("청구항").and_then(|n| n.parse().ok()) {
-                sec = Sec::Claim;
-                spec.claims.push(Claim { num: n, text: String::new(), refs: vec![] });
+            if name.strip_prefix("청구항").is_some_and(|n| n.parse::<u32>().is_ok()) {
+                part = Part::Claim;
             } else if name == "도면의간단한설명" {
-                sec = Sec::Brief;
+                part = Part::Brief;
             } else if name == "부호의설명" {
-                sec = Sec::Signs;
-            } else if name == "도면" {
-                sec = Sec::Skip;
-                spec.drawings.get_or_insert_with(Vec::new);
-            } else if let Some(f) = name.strip_prefix('도').and_then(fig_id) {
-                sec = Sec::Skip;
-                spec.drawings.get_or_insert_with(Vec::new).push(f);
-            } else if name.contains("요약") || name == "대표도" || name.ends_with("청구범위") {
-                sec = Sec::Skip;
+                part = Part::Signs;
+            } else if name == "도면" || name.strip_prefix('도').and_then(fig_id).is_some() || name.ends_with("청구범위") {
+                part = Part::Skip;
+            } else if name.contains("요약") || name == "대표도" {
+                part = Part::Abstract;
             } else if BODY_HEADS.iter().any(|h| name.starts_with(h)) {
-                sec = Sec::Body;
+                part = Part::Body;
             }
-            // 그 밖의 머리말([0001], 【표 1】, 【수학식 1】)은 섹션을 바꾸지 않는다
+            header = Some(name);
         }
-        let buf = match sec {
-            Sec::Body => &mut spec.body,
-            Sec::Brief => &mut spec.brief,
-            Sec::Signs => &mut spec.signs,
-            Sec::Claim => &mut spec.claims.last_mut().unwrap().text,
-            Sec::Skip => continue,
+        out.push(Line { part, header, rest });
+    }
+    out
+}
+
+pub fn parse(text: &str) -> Spec {
+    let mut spec = Spec::default();
+    for l in lines(text) {
+        let h = l.header.as_deref().unwrap_or("");
+        if l.part == Part::Claim {
+            if let Some(n) = h.strip_prefix("청구항").and_then(|n| n.parse().ok()) {
+                spec.claims.push(Claim { num: n, text: String::new(), refs: vec![] });
+            }
+        } else if l.part == Part::Skip {
+            if h == "도면" {
+                spec.drawings.get_or_insert_with(Vec::new);
+            } else if let Some(f) = h.strip_prefix('도').and_then(fig_id) {
+                spec.drawings.get_or_insert_with(Vec::new).push(f);
+            }
+        }
+        let buf = match l.part {
+            Part::Body => &mut spec.body,
+            Part::Brief => &mut spec.brief,
+            Part::Signs => &mut spec.signs,
+            Part::Claim => &mut spec.claims.last_mut().unwrap().text,
+            Part::Abstract | Part::Skip => continue,
         };
-        buf.push_str(rest);
+        buf.push_str(l.rest);
         buf.push('\n');
     }
     for c in &mut spec.claims {
